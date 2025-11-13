@@ -50,7 +50,7 @@ const parseEditedContent = (content: string, originalRows: NodeRow[]): NodeRow[]
       return [
         {
           ...originalRows[0],
-          value: String(parsed),
+          value: parsed,
         },
       ];
     }
@@ -58,11 +58,17 @@ const parseEditedContent = (content: string, originalRows: NodeRow[]): NodeRow[]
     // If it's an object with multiple properties
     return Object.entries(parsed).map(([key, value]) => {
       const original = originalRows.find(row => row.key === key);
+      let inferredType = original?.type || "string";
+      if (Array.isArray(value)) inferredType = "array";
+      else if (value !== null && typeof value === "object") inferredType = "object";
+      else if (typeof value === "boolean") inferredType = "boolean";
+      else if (typeof value === "number") inferredType = "number";
+
       return {
         key,
-        value: String(value),
-        type: original?.type || "string",
-      };
+        value: value as any,
+        type: inferredType,
+      } as NodeRow;
     });
   } catch {
     throw new Error("Invalid JSON format");
@@ -79,11 +85,12 @@ const updateJsonWithNodeValue = (
     const parsed = JSON.parse(json);
 
     if (!path || path.length === 0) {
-      // Root level edit
+      // Root level edit - merge changes into root to avoid losing other keys
       if (newValue.length === 1 && !newValue[0].key) {
         return JSON.stringify(newValue[0].value, null, 2);
       }
-      const obj: any = {};
+      const existingRoot = parsed && typeof parsed === "object" ? parsed : {};
+      const obj: any = { ...existingRoot };
       newValue.forEach(row => {
         if (row.key) obj[row.key] = parseValueByType(row.value, row.type);
       });
@@ -103,8 +110,9 @@ const updateJsonWithNodeValue = (
       // Single value update
       current[lastKey] = parseValueByType(newValue[0].value, newValue[0].type);
     } else {
-      // Object update
-      const obj: any = {};
+      // Object update - merge into existing object to preserve nested keys that weren't edited
+      const existing = current[lastKey];
+      const obj: any = existing && typeof existing === "object" ? { ...existing } : {};
       newValue.forEach(row => {
         if (row.key) obj[row.key] = parseValueByType(row.value, row.type);
       });
@@ -119,10 +127,11 @@ const updateJsonWithNodeValue = (
 };
 
 // Parse value based on its type
-const parseValueByType = (value: string | number | null, type: string): any => {
+const parseValueByType = (value: any, type: string): any => {
   if (value === null || value === "null") return null;
-  if (type === "boolean") return value === "true" || value === "1";
+  if (type === "boolean") return value === true || value === "true" || value === "1";
   if (type === "number") return Number(value);
+  if (type === "object" || type === "array") return value;
   return value;
 };
 
@@ -136,7 +145,26 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
   const setContents = useFile(state => state.setContents);
   const setSelectedNode = useGraph.getState().setSelectedNode;
 
-  const normalizedContent = useMemo(() => normalizeNodeData(nodeData?.text ?? []), [nodeData]);
+  const normalizedContent = useMemo(() => {
+    if (!nodeData) return "{}";
+    try {
+      const parsed = JSON.parse(getJson());
+      let current: any = parsed;
+      const path = nodeData.path ?? [];
+      for (let i = 0; i < path.length; i++) {
+        current = current?.[path[i]];
+      }
+
+      // If we can retrieve the actual node value from the global JSON, use that
+      if (typeof current !== "undefined") {
+        return JSON.stringify(current, null, 2);
+      }
+    } catch (err) {
+      // fallback to previous behavior
+    }
+
+    return normalizeNodeData(nodeData?.text ?? []);
+  }, [nodeData, getJson]);
 
   const handleEditClick = () => {
     setEditedContent(normalizedContent);
